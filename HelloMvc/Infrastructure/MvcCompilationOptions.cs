@@ -1,69 +1,105 @@
-
-
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using Microsoft.AspNet.Mvc.Razor;
 using Microsoft.CodeAnalysis;
 using Microsoft.Extensions.Options;
-using Microsoft.Extensions.PlatformAbstractions;
+using Microsoft.Extensions.DependencyModel;
+using Microsoft.AspNet.Mvc.Razor.Compilation;
+
+using CompilationOptions = Microsoft.Extensions.DependencyModel.CompilationOptions;
+using Platform = Microsoft.CodeAnalysis.Platform;
 
 namespace HelloMvc
 {
     public class MvcCompilationOptions : ConfigureOptions<RazorViewEngineOptions>
     {
-        public MvcCompilationOptions(IApplicationEnvironment applicationEnvironment) : base(options => Configure(options, applicationEnvironment))
+        public MvcCompilationOptions() : base(options => { })
         {
-
         }
 
-        private static void Configure(RazorViewEngineOptions options, IApplicationEnvironment appEnvironment)
+        private Lazy<IEnumerable<MetadataReference>> _references = new Lazy<IEnumerable<MetadataReference>>(GetReferences);
+
+        private Lazy<CompilationOptions> _compilationOptions = new Lazy<CompilationOptions>(GetCompilationOptions);
+
+        public override void Configure(RazorViewEngineOptions options)
         {
-            var previous = options.CompilationCallback;
+            var previousCallback = options.CompilationCallback;
+            var compilationOptions = _compilationOptions.Value;
 
-            options.CompilationCallback = c =>
+            SetParseOptions(options, compilationOptions);
+
+            options.CompilationCallback = (context) =>
             {
-                // Compose with the previous options
-                previous(c);
+                previousCallback?.Invoke(context);
 
-                var refs = ResolveCompilationReferences(appEnvironment);
-
-                c.Compilation = c.Compilation
-                    .AddReferences(refs);
+                SetCompilationOptions(context, compilationOptions);
             };
         }
-        
-        private static IEnumerable<MetadataReference> ResolveCompilationReferences(IApplicationEnvironment appEnvironment)
+
+        private void SetCompilationOptions(RoslynCompilationContext context, CompilationOptions compilationOptions)
         {
-            // See the following issues for progress on resolving references:
-            // https://github.com/aspnet/Mvc/issues/3633
-            // https://github.com/dotnet/cli/issues/376
-            
-            // HACK WARNING: We don't have a way to get the reference assemblies at runtime
-            // so this is super hacky and parses the response file passed into dotnet-compile-csc in order to discover 
-            // compile time references. It's VERY fragile and barely works :).
-            var responseFileName = $"dotnet-compile.{appEnvironment.ApplicationName}.rsp";
-            var baseDir = new DirectoryInfo(appEnvironment.ApplicationBasePath);
-            string responseFilePath = Path.Combine(baseDir.FullName, responseFileName);
+            var roslynOptions = context.Compilation.Options;
 
-            if (!File.Exists(responseFilePath))
+            // Disable 1702 until roslyn turns this off by default
+            roslynOptions = roslynOptions.WithSpecificDiagnosticOptions(
+                new Dictionary<string, ReportDiagnostic>
+                {
+                    {"CS1701", ReportDiagnostic.Suppress}, // Binding redirects
+                    {"CS1702", ReportDiagnostic.Suppress},
+                    {"CS1705", ReportDiagnostic.Suppress}
+                });
+
+            if (compilationOptions.AllowUnsafe.HasValue)
             {
-                responseFilePath = Path.Combine(baseDir.Parent.Parent.Parent.FullName, "obj", baseDir.Parent.Name, baseDir.Name, responseFileName);
+                roslynOptions = roslynOptions.WithAllowUnsafe(compilationOptions.AllowUnsafe.Value);
             }
 
-            if (!File.Exists(responseFilePath))
+            if (compilationOptions.Optimize.HasValue)
             {
-                // Logic was too flaky
-                throw new InvalidOperationException("Unable to resolve references!");
+                var optimizationLevel = compilationOptions.Optimize.Value ? OptimizationLevel.Debug : OptimizationLevel.Release;
+                roslynOptions = roslynOptions.WithOptimizationLevel(optimizationLevel);
             }
 
-            // Parse line by line and find the references
-            var refs = File.ReadAllLines(responseFilePath)
-                           .Where(l => l.StartsWith("--reference:"))
-                           .Select(l => l.Substring("--reference:".Length))
-                           .Select(path => MetadataReference.CreateFromFile(path));
-            return refs;
+            if (compilationOptions.WarningsAsErrors.HasValue)
+            {
+                var reportDiagnostic = compilationOptions.WarningsAsErrors.Value ? ReportDiagnostic.Error : ReportDiagnostic.Default;
+                roslynOptions = roslynOptions.WithGeneralDiagnosticOption(reportDiagnostic);
+            }
+
+            context.Compilation = context.Compilation
+                .WithReferences(_references.Value)
+                .WithOptions(roslynOptions);
+        }
+
+        private static void SetParseOptions(RazorViewEngineOptions options, CompilationOptions compilationOptions)
+        {
+            var roslynParseOptions = options.ParseOptions;
+            roslynParseOptions = roslynParseOptions.WithPreprocessorSymbols(compilationOptions.Defines);
+
+            var languageVersion = roslynParseOptions.LanguageVersion;
+            if (Enum.TryParse(compilationOptions.LanguageVersion, ignoreCase: true, result: out languageVersion))
+            {
+                roslynParseOptions = roslynParseOptions.WithLanguageVersion(languageVersion);
+            }
+
+            options.ParseOptions = roslynParseOptions;
+        }
+
+        private static IEnumerable<MetadataReference> GetReferences()
+        {
+            var entryAssembly = (Assembly) typeof(Assembly).GetTypeInfo().GetDeclaredMethod("GetEntryAssembly").Invoke(null, null);
+
+            var location = Path.Combine(Path.GetDirectoryName(entryAssembly.Location), "refs");
+
+            return Directory.GetFiles(location, "*.dll").Select(file => MetadataReference.CreateFromFile(file));
+        }
+
+        private static CompilationOptions GetCompilationOptions()
+        {
+            return DependencyContext.Load().CompilationOptions;
         }
     }
 }

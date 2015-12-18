@@ -1,14 +1,18 @@
 {
     "version": "1.0.1-*",
     "compilationOptions": {
-        "emitEntryPoint": true
+        "emitEntryPoint": true,
+        "preserveCompilationContext":  true
     },
-    "dependencies" : {
+    "dependencies": {
         "NETStandard.Library": "1.0.0-rc2-23616",
         "Microsoft.AspNet.Mvc": "6.0.0-*",
+        "Microsoft.AspNet.Mvc.Razor": "6.0.0-*",
         "Microsoft.AspNet.Diagnostics": "1.0.0-*",
         "Microsoft.AspNet.Server.Kestrel": "1.0.0-*",
-        "System.Runtime.Serialization.Primitives": "4.1.0-*"
+        "System.Runtime.Serialization.Primitives": "4.1.0-*",
+        "Microsoft.Extensions.DependencyModel": "1.0.0-*",
+        "Microsoft.CodeAnalysis": "1.1.0-*"
     },
     "frameworks": {
         "dnxcore50": { }
